@@ -1,0 +1,4 @@
+(executables
+ (public_names test_lexer test_parser test_semantic)
+ (names test_lexer test_parser test_semantic)
+ (libraries cresta.lib))

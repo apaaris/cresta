@@ -1,0 +1,4 @@
+(executable
+ (public_name cre)
+ (name main)
+ (libraries cresta.lib))
