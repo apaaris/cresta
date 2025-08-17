@@ -1,0 +1,103 @@
+# OCaml and Dune build artifacts
+_build/
+*.install
+*.merlin
+.merlin-conf
+
+# OCaml compiled files
+*.cmi
+*.cmo
+*.cmx
+*.cma
+*.cmxa
+*.a
+*.o
+*.so
+*.dylib
+*.dll
+*.exe
+
+# OCaml native code
+*.opt
+*.native
+
+# OCaml bytecode
+*.byte
+
+# OCaml documentation
+*.docdir/
+
+# Dune artifacts
+dune-project.lock
+*.opam.locked
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.#*
+\#*\#
+
+# macOS specific
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# Linux specific
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+# Windows specific
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Test outputs and temporary test files
+test_output/
+*.test
+*.cr.out
+*.c.out
+
+# Backup files
+*.bak
+*.backup
+*.orig
+
+# Package manager files (if using opam)
+_opam/
+*.opam.template
+
+# Local development files
+.env
+.env.local
+local_config.*
+
+# Coverage reports
+bisect*.coverage
+_coverage/
+
+# Profiling data
+gmon.out
+*.prof
+
+# Core dumps
+core
+core.*
+
+# Generated parser/lexer files (if you regenerate them)
+# Uncomment these if your lexer.ml and parser.ml are generated
+# lib/lexer.ml
+# lib/parser.ml
+# lib/parser.mli
