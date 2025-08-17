@@ -181,14 +181,20 @@ let print_usage () =
   print_endline "Usage: cresta [options] <input_file>";
   print_endline "";
   print_endline "Options:";
-  print_endline "  -o <file>    Specify output file";
-  print_endline "  -v           Verbose mode";
-  print_endline "  -d           Debug mode";
+  print_endline "  -o <file>    Specify output file (default: <input>.ll)";
+  print_endline "  -v           Verbose mode (show compilation phases)";
+  print_endline "  -d           Debug mode (preserve intermediate representations)";
   print_endline "  -h, --help   Show this help message";
   print_endline "";
   print_endline "Examples:";
-  print_endline "  cresta program.cr";
-  print_endline "  cresta -v -o output.c program.cr"
+  print_endline "  cresta program.cr                    # Compile to program.ll";
+  print_endline "  cresta -v program.cr                 # Verbose compilation";
+  print_endline "  cresta -o output.ll program.cr       # Custom output file";
+  print_endline "  cresta -d program.cr                 # Debug with intermediate files";
+  print_endline "";
+  print_endline "Generated LLVM IR can be compiled to native code with:";
+  print_endline "  llc program.ll -o program.s         # Generate assembly";
+  print_endline "  clang program.s -o program           # Link to executable"
 
 (* Main function - entry point *)
 let main () =

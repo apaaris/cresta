@@ -1,3 +1,4 @@
 (library
  (public_name cresta.lib)
- (name cresta_lib))
+ (name cresta_lib)
+ (libraries llvm))

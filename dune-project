@@ -4,6 +4,6 @@
 
 (package
  (name cresta)
- (depends ocaml dune)
+ (depends ocaml dune llvm)
  (synopsis "A scientific computing language compiler")
  (description "Cresta: A C++-like statically typed language optimized for scientific computing"))
