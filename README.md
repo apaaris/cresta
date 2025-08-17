@@ -32,35 +32,64 @@ dune exec cre -- <options> <input_file>
 ## Usage
 
 ```cresta
-// Define a class
-class Point {
+// Matrix class with proper encapsulation
+class Matrix {
 private:
-    <int32> x;
-    <int32> y;
+    <int32[100]> data;
+    <int32> rows;
+    <int32> cols;
 
 public:
-    void set(<int32> nx, <int32> ny) {
-        x = nx;
-        y = ny;
+    void initialize(<int32> r, <int32> c) {
+        rows = r;
+        cols = c;
+        <int32> i = 0;
+        while (i < int32(100)) {
+            data[i] = 0;
+            i = i + int32(1);
+        }
     }
     
-    <int32> distance_squared() {
-        return x * x + y * y;
+    <int32> sum_elements() {
+        <int32> total = 0;
+        <int32> i = 0;
+        <int32> size = rows * cols;
+        
+        while (i < size) {
+            total = total + data[i];
+            i = i + int32(1);
+        }
+        return total;
     }
 }
 
-// Use arrays and control flow
-<int32> main() {
-    <int32[5]> numbers = [0, 1, 4, 9, 16];
-    <int32> sum = 0;
-    <int32> i = 0;
-    
-    while (i < 5) {
-        sum = sum + numbers[i];
-        i = i + int32(1);  // Explicit cast required
+// Function with array parameters and control flow
+<int32> fibonacci(<int32> n) {
+    if (n <= int32(1)) {
+        return n;
     }
     
-    return sum;
+    <int32> a = 0;
+    <int32> b = 1;
+    <int32> i = 2;
+    
+    while (i <= n) {
+        <int32> temp = a + b;
+        a = b;
+        b = temp;
+        i = i + int32(1);
+    }
+    return b;
+}
+
+<int32> main() {
+    <Matrix> matrix;
+    matrix.initialize(int32(3), int32(3));
+    
+    <int32[5]> numbers = [10, 25, 5, 30, 15];
+    <int32> result = matrix.sum_elements() + fibonacci(int32(10));
+    
+    return result;
 }
 ```
 

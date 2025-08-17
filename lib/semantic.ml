@@ -2,6 +2,26 @@
 
 open Parser
 
+(* Utility function to convert type to string *)
+let rec string_of_type = function
+  | Int8 -> "int8"
+  | UInt8 -> "uint8"
+  | Int16 -> "int16"
+  | UInt16 -> "uint16"
+  | Int32 -> "int32"
+  | UInt32 -> "uint32"
+  | Int64 -> "int64"
+  | UInt64 -> "uint64"
+  | Float32 -> "float32"
+  | Float64 -> "float64"
+  | Bool -> "bool"
+  | String -> "string"
+  | Complex t -> "complex<" ^ string_of_type t ^ ">"
+  | Array (t, dims) -> 
+      let dim_str = String.concat "," (List.map string_of_int dims) in
+      string_of_type t ^ "[" ^ dim_str ^ "]"
+  | UserDefined name -> name
+
 (* Semantic analysis errors *)
 type semantic_error = {
   message : string;
@@ -140,6 +160,13 @@ let rec check_expression (ctx : semantic_context) (expr : expression) : cresta_t
              (match op with
               | "+" | "-" | "*" | "/" | ".+" | ".-" | ".*" | "./" -> Some left_type
               | "<" | "<=" | ">" | ">=" | "==" | "!=" -> Some Bool
+              | "=" -> 
+                  (* Assignment expression - check that left side is a variable *)
+                  (match left with
+                   | Variable _ -> Some left_type  (* Assignment returns the assigned value type *)
+                   | _ -> 
+                       add_error ctx ("Left side of assignment must be a variable") ("expression");
+                       None)
               | _ -> 
                   add_error ctx ("Unknown binary operator: " ^ op) ("expression");
                   None)
@@ -203,10 +230,54 @@ let rec check_expression (ctx : semantic_context) (expr : expression) : cresta_t
            add_error ctx ("Cannot call method on non-class type") ("method call");
            None
        | None -> None)
-  | ArrayAccess (_, _) ->
-      (* TODO: Implement array access type checking *)
-      add_error ctx ("Array access not yet implemented") ("expression");
-      None
+  | ArrayAccess (array_expr, index_exprs) ->
+      (* Check the array expression type *)
+      (match check_expression ctx array_expr with
+       | Some (Array(elem_type, dimensions)) ->
+           (* Check that we have the right number of indices *)
+           let num_indices = List.length index_exprs in
+           let num_dimensions = List.length dimensions in
+           if num_indices <> num_dimensions then (
+             add_error ctx (Printf.sprintf "Array access expects %d indices but got %d" num_dimensions num_indices) ("expression");
+             None
+           ) else (
+             (* Check that all indices are integers *)
+             let all_indices_valid = List.for_all (fun index_expr ->
+               match check_expression ctx index_expr with
+               | Some Int32 -> true  (* For now, only support int32 indices *)
+               | Some other_type -> 
+                   add_error ctx ("Array index must be int32, got: " ^ string_of_type other_type) ("expression");
+                   false
+               | None -> false
+             ) index_exprs in
+             if all_indices_valid then Some elem_type else None
+           )
+       | Some other_type ->
+           add_error ctx ("Cannot index non-array type: " ^ string_of_type other_type) ("expression");
+           None
+       | None -> None)
+  | ArrayLiteral elements ->
+      (* Check that all elements have the same type *)
+      (match elements with
+       | [] -> 
+           add_error ctx ("Empty array literals not supported") ("expression");
+           None
+       | first :: rest ->
+           let first_type = check_expression ctx first in
+           let all_same_type = List.for_all (fun elem ->
+             let elem_type = check_expression ctx elem in
+             match (first_type, elem_type) with
+             | (Some t1, Some t2) -> types_compatible t1 t2
+             | _ -> false
+           ) rest in
+           if all_same_type then
+             match first_type with
+             | Some elem_type -> Some (Array(elem_type, [List.length elements]))
+             | None -> None
+           else (
+             add_error ctx ("Array literal elements must have the same type") ("expression");
+             None
+           ))
 
 (* Check a statement *)
 let rec check_statement (ctx : semantic_context) (stmt : statement) : unit =
@@ -324,9 +395,42 @@ let rec check_statement (ctx : semantic_context) (stmt : statement) : unit =
        | None ->
            add_error ctx ("Return statement outside of function") ("return statement"))
            
-  | ForLoop (_, _, _, _) | WhileLoop (_, _) ->
-      (* TODO: Implement loop checking *)
-      add_error ctx ("Loop statements not yet implemented") ("statement")
+  | ForLoop (init_stmt, condition, update_expr, body_stmts) ->
+      (* Check init statement *)
+      (match init_stmt with
+       | Some stmt -> check_statement ctx stmt
+       | None -> ());
+      
+      (* Check condition expression *)
+      (match condition with
+       | Some cond_expr -> 
+           (match check_expression ctx cond_expr with
+            | Some Bool -> ()  (* Good - boolean condition *)
+            | Some other_type -> 
+                add_error ctx ("For loop condition must be boolean, got: " ^ string_of_type other_type) ("statement")
+            | None -> 
+                add_error ctx ("Invalid expression in for loop condition") ("statement"))
+       | None -> ());  (* No condition is valid (infinite loop) *)
+      
+      (* Check update expression *)
+      (match update_expr with
+       | Some update -> ignore (check_expression ctx update)
+       | None -> ());
+      
+      (* Check body statements *)
+      List.iter (check_statement ctx) body_stmts
+      
+  | WhileLoop (condition, body_stmts) ->
+      (* Check condition expression *)
+      (match check_expression ctx condition with
+       | Some Bool -> ()  (* Good - boolean condition *)
+       | Some other_type -> 
+           add_error ctx ("While loop condition must be boolean, got: " ^ string_of_type other_type) ("statement")
+       | None -> 
+           add_error ctx ("Invalid expression in while loop condition") ("statement"));
+      
+      (* Check body statements *)
+      List.iter (check_statement ctx) body_stmts
 
 (* Main semantic analysis function *)
 let analyze_program (program : cresta_program) : (semantic_context, semantic_error list) result =

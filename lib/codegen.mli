@@ -9,6 +9,9 @@ type llvm_context = {
   builder : Llvm.llbuilder;
   mutable named_values : (string, Llvm.llvalue) Hashtbl.t;
   mutable class_types : (string, Llvm.lltype) Hashtbl.t;
+  mutable current_class : string option;  (* Name of class we're currently in *)
+  mutable current_method_this : Llvm.llvalue option;  (* 'this' parameter if in method *)
+  mutable current_class_fields : (string * cresta_type) list;  (* Fields of current class *)
 }
 
 (* Code generation errors *)

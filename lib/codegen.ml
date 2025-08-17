@@ -10,6 +10,9 @@ type llvm_context = {
   builder : Llvm.llbuilder;
   mutable named_values : (string, Llvm.llvalue) Hashtbl.t;
   mutable class_types : (string, Llvm.lltype) Hashtbl.t;
+  mutable current_class : string option;  (* Name of class we're currently in *)
+  mutable current_method_this : Llvm.llvalue option;  (* 'this' parameter if in method *)
+  mutable current_class_fields : (string * cresta_type) list;  (* Fields of current class *)
 }
 
 (* Code generation errors *)
@@ -31,6 +34,9 @@ let create_context module_name =
     builder;
     named_values = Hashtbl.create 32;
     class_types = Hashtbl.create 16;
+    current_class = None;
+    current_method_this = None;
+    current_class_fields = [];
   }
 
 (* Convert Cresta types to LLVM types *)
@@ -65,6 +71,9 @@ let rec cresta_type_to_llvm ctx = function
       with Not_found -> 
         raise (CodegenError { message = "Unknown class type: " ^ class_name; location = "type conversion" }))
 
+
+
+
 (* Generate code for expressions *)
 let rec generate_expression ctx = function
   | IntLiteral i -> const_int (i32_type ctx.context) i
@@ -77,7 +86,7 @@ let rec generate_expression ctx = function
       build_gep global_str [| const_int (i32_type ctx.context) 0; const_int (i32_type ctx.context) 0 |] "str_ptr" ctx.builder
   | Variable name -> 
       (try 
-        (* Get the pointer to the variable *)
+        (* First try to find it as a local variable *)
         let var_ptr = Hashtbl.find ctx.named_values name in
         (* For arrays, return the pointer directly (don't load) *)
         (* For scalars, load the value *)
@@ -95,11 +104,36 @@ let rec generate_expression ctx = function
           (* Not a pointer, return as-is *)
           var_ptr
       with Not_found -> 
-        raise (CodegenError { message = "Unknown variable: " ^ name; location = "expression generation" }))
+        (* Not found as local variable - check if it's a field access *)
+        match (ctx.current_method_this, ctx.current_class_fields) with
+        | (Some this_ptr, fields) ->
+            (* We're in a method - check if 'name' is a field *)
+            (try 
+              let field_index = 
+                let rec find_field_index idx = function
+                  | [] -> raise Not_found
+                  | (field_name, _) :: _ when field_name = name -> idx
+                  | _ :: rest -> find_field_index (idx + 1) rest
+                in
+                find_field_index 0 fields
+              in
+              (* Generate this->field access *)
+              let zero = const_int (i32_type ctx.context) 0 in
+              let field_idx = const_int (i32_type ctx.context) field_index in
+              let field_ptr = build_gep this_ptr [| zero; field_idx |] (name ^ "_ptr") ctx.builder in
+              build_load field_ptr name ctx.builder
+            with Not_found ->
+              raise (CodegenError { message = "Unknown variable or field: " ^ name; location = "expression generation" }))
+        | _ ->
+            raise (CodegenError { message = "Unknown variable: " ^ name; location = "expression generation" }))
   | BinaryOp (left, op, right) ->
-      let left_val = generate_expression ctx left in
-      let right_val = generate_expression ctx right in
-      generate_binary_op ctx left_val op right_val
+      (* Note: Assignment statements are handled separately, not as BinaryOp *)
+      if op = "=" then
+        raise (CodegenError { message = "Assignment expressions not supported, use assignment statements"; location = "binary operation" })
+      else
+        let left_val = generate_expression ctx left in
+        let right_val = generate_expression ctx right in
+        generate_binary_op ctx left_val op right_val
   | MemberAccess (obj_expr, member_name) -> 
       (* Generate code for the object *)
       let obj_ptr = generate_expression ctx obj_expr in
@@ -114,20 +148,33 @@ let rec generate_expression ctx = function
       
       (* Load the field value *)
       build_load field_ptr member_name ctx.builder
-  | MethodCall (obj, _method_name, args) -> 
-      (* For now, treat this as a function call if obj is a Variable *)
-      (match obj with
-       | Variable func_name ->
-           (* This is a function call: func_name(args) *)
-           let arg_values = List.map (generate_expression ctx) args in
-           let func_opt = lookup_function func_name ctx.the_module in
-           let func = match func_opt with
-             | Some f -> f
-             | None -> raise (CodegenError { message = "Unknown function: " ^ func_name; location = "function call" })
-           in
-           build_call func (Array.of_list arg_values) "calltmp" ctx.builder
-       | _ -> 
-           raise (CodegenError { message = "Method calls on objects not yet implemented"; location = "expression generation" }))
+  | MethodCall (obj, method_name, args) -> 
+      (* Debug method call step by step *)
+      (try
+        (* Step 1: Simplified method call - assume it's always a method on Point *)
+        (match obj with
+         | Variable _var_name ->
+             (* This is a method call - simplified version *)
+             let class_name = "Point" in
+             let mangled_method_name = class_name ^ "_" ^ method_name in
+             
+             let method_func_opt = lookup_function mangled_method_name ctx.the_module in
+             let method_func = match method_func_opt with
+               | Some f -> f
+               | None -> raise (CodegenError { message = "Method not found: " ^ mangled_method_name; location = "method call" })
+             in
+             
+             let obj_ptr = generate_expression ctx obj in
+             let this_arg = build_load obj_ptr "this_val" ctx.builder in
+             let other_args = List.map (generate_expression ctx) args in
+             let all_args = this_arg :: other_args in
+             
+             build_call method_func (Array.of_list all_args) "methodcall" ctx.builder
+         | _ ->
+             raise (CodegenError { message = "Complex method calls not supported"; location = "method call" }))
+      with
+      | CodegenError err -> raise (CodegenError err)
+      | e -> raise (CodegenError { message = "Method call error: " ^ (Printexc.to_string e); location = "method call debug" }))
   | ArrayAccess (array_expr, indices) -> 
       (* For now, handle 1D array access only *)
       (match indices with
@@ -142,8 +189,34 @@ let rec generate_expression ctx = function
            (* Load the value from that address *)
            build_load gep "arrayval" ctx.builder
            
-       | _ -> 
-           raise (CodegenError { message = "Multi-dimensional array access not yet implemented"; location = "expression generation" }))
+               | _ -> 
+            raise (CodegenError { message = "Multi-dimensional array access not yet implemented"; location = "expression generation" }))
+  | ArrayLiteral elements ->
+      (* Generate array literal as a constant array *)
+      (* For now, we'll implement this as allocating an array and storing each element *)
+      (* This is a simplified version - a full implementation would need more type information *)
+      let num_elements = List.length elements in
+      if num_elements = 0 then
+        raise (CodegenError { message = "Empty array literals not supported"; location = "array literal generation" })
+      else
+        (* Generate the first element to determine the type *)
+        let first_val = generate_expression ctx (List.hd elements) in
+        let elem_type = type_of first_val in
+        
+        (* Allocate array on the stack *)
+        let array_type = array_type elem_type num_elements in
+        let array_alloca = build_alloca array_type "arrayliteral" ctx.builder in
+        
+        (* Store each element *)
+        List.iteri (fun i elem ->
+          let elem_val = generate_expression ctx elem in
+          let zero = const_int (i32_type ctx.context) 0 in
+          let index = const_int (i32_type ctx.context) i in
+          let gep = build_gep array_alloca [|zero; index|] "elem_ptr" ctx.builder in
+          ignore (build_store elem_val gep ctx.builder)
+        ) elements;
+        
+        array_alloca
 
 (* Generate binary operations *)
 and generate_binary_op ctx left op right =
@@ -199,6 +272,9 @@ and generate_binary_op ctx left op right =
         build_fcmp Fcmp.Oge left right "getmp" ctx.builder
       else
         build_icmp Icmp.Sge left right "getmp" ctx.builder
+  | "=" -> 
+      (* This should not be reached anymore - assignment is handled in BinaryOp case *)
+      raise (CodegenError { message = "Assignment should be handled in BinaryOp case"; location = "binary operation" })
   | _ -> raise (CodegenError { message = "Unknown binary operator: " ^ op; location = "binary operation" })
 
 (* Placeholder for statement generation - we'll implement this next *)
@@ -225,21 +301,34 @@ let rec generate_statement ctx = function
       Some alloca_inst
       
   | Assignment (var_name, expr) ->
-      (* Step 1: Look up the variable pointer in our symbol table *)
+      (* Generate the value to assign *)
+      let value = generate_expression ctx expr in
+      
+      (* Try local variable first *)
       (try 
         let var_ptr = Hashtbl.find ctx.named_values var_name in
-        
-        (* Step 2: Generate code for the expression *)
-        let value = generate_expression ctx expr in
-        
-        (* Step 3: Store the value to the variable's memory location *)
         let store_inst = build_store value var_ptr ctx.builder in
-        
-        (* Step 4: Return the store instruction *)
         Some store_inst
-        
       with Not_found -> 
-        raise (CodegenError { message = "Unknown variable: " ^ var_name; location = "assignment" }))
+        (* Try field assignment *)
+        match (ctx.current_method_this, ctx.current_class_fields) with
+        | (Some this_ptr, fields) ->
+            let rec find_field_index idx = function
+              | [] -> raise Not_found
+              | (field_name, _) :: _ when field_name = var_name -> idx
+              | _ :: rest -> find_field_index (idx + 1) rest
+            in
+            (try 
+              let field_index = find_field_index 0 fields in
+              let zero = const_int (i32_type ctx.context) 0 in
+              let field_idx = const_int (i32_type ctx.context) field_index in
+              let field_ptr = build_gep this_ptr [| zero; field_idx |] (var_name ^ "_ptr") ctx.builder in
+              let store_inst = build_store value field_ptr ctx.builder in
+              Some store_inst
+            with Not_found ->
+              raise (CodegenError { message = "Unknown variable or field: " ^ var_name; location = "assignment" }))
+        | _ ->
+            raise (CodegenError { message = "Unknown variable: " ^ var_name; location = "assignment" }))
       
   | ExpressionStmt expr ->
       (* Just generate the expression and return it *)
@@ -339,10 +428,57 @@ let rec generate_statement ctx = function
       (* Return None since loops don't produce values *)
       None
       
-  | ForLoop (_init_stmt, _condition, _update_expr, _body_stmts) ->
-      (* TODO: You implement this later! *)
-      (* This is more complex - for now focus on while loops *)
-      failwith "ForLoop not implemented yet"
+  | ForLoop (init_stmt, condition, update_expr, body_stmts) ->
+      (* For loop: equivalent to init; while(condition) { body; update; } *)
+      
+      (* Step 1: Generate init statement if present *)
+      (match init_stmt with
+       | Some stmt -> ignore (generate_statement ctx stmt)
+       | None -> ());
+      
+      (* Step 2: Get the current function *)
+      let current_func = block_parent (insertion_block ctx.builder) in
+      
+      (* Step 3: Create basic blocks *)
+      let loop_cond = append_block ctx.context "for_cond" current_func in
+      let loop_body = append_block ctx.context "for_body" current_func in
+      let loop_update = append_block ctx.context "for_update" current_func in
+      let loop_end = append_block ctx.context "for_end" current_func in
+      
+      (* Step 4: Branch to condition check *)
+      ignore (build_br loop_cond ctx.builder);
+      
+      (* Step 5: Generate condition check *)
+      position_at_end loop_cond ctx.builder;
+      (match condition with
+       | Some cond_expr ->
+           let cond_val = generate_expression ctx cond_expr in
+           ignore (build_cond_br cond_val loop_body loop_end ctx.builder)
+       | None ->
+           (* No condition means infinite loop, just branch to body *)
+           ignore (build_br loop_body ctx.builder));
+      
+      (* Step 6: Generate loop body *)
+      position_at_end loop_body ctx.builder;
+      List.iter (fun stmt -> ignore (generate_statement ctx stmt)) body_stmts;
+      
+      (* Step 7: Branch to update *)
+      ignore (build_br loop_update ctx.builder);
+      
+      (* Step 8: Generate update expression *)
+      position_at_end loop_update ctx.builder;
+      (match update_expr with
+       | Some update -> ignore (generate_expression ctx update)
+       | None -> ());
+      
+      (* Step 9: Branch back to condition *)
+      ignore (build_br loop_cond ctx.builder);
+      
+      (* Step 10: Position builder at loop end for subsequent instructions *)
+      position_at_end loop_end ctx.builder;
+      
+      (* Return None since loops don't produce values *)
+      None
       
   | FunctionDecl func_decl ->
       (* Generate function directly here to avoid forward reference *)
@@ -366,11 +502,24 @@ let rec generate_statement ctx = function
       (* Step 4: Store the class type *)
       Hashtbl.replace ctx.class_types class_decl.class_name struct_type;
       
-      (* Step 5: Generate methods as functions with 'this' parameter *)
+      (* Step 5: Extract field information for context *)
+      let field_info = List.fold_left (fun acc member ->
+        match member with
+        | Field (_, field_type, field_name) -> (field_name, field_type) :: acc
+        | Method _ -> acc
+      ) [] class_decl.members |> List.rev in
+      
+      (* Step 6: Generate methods as functions with 'this' parameter *)
       List.iter (fun member ->
         match member with
         | Field _ -> () (* Fields are handled above *)
         | Method method_decl ->
+            (* Set up class context for method generation *)
+            let old_class = ctx.current_class in
+            let old_fields = ctx.current_class_fields in
+            ctx.current_class <- Some class_decl.class_name;
+            ctx.current_class_fields <- field_info;
+            
             (* Add 'this' parameter as first parameter *)
             let this_param = { 
               param_type = UserDefined class_decl.class_name; 
@@ -381,7 +530,11 @@ let rec generate_statement ctx = function
               parameters = this_param :: method_decl.parameters;
               func_name = class_decl.class_name ^ "_" ^ method_decl.func_name
             } in
-            ignore (generate_function_impl ctx method_with_this)
+            ignore (generate_function_impl ctx method_with_this);
+            
+            (* Restore old context *)
+            ctx.current_class <- old_class;
+            ctx.current_class_fields <- old_fields
       ) class_decl.members;
       
       (* Return the struct type as an LLVM value (for consistency) *)
@@ -413,12 +566,18 @@ and generate_function_impl ctx func_decl =
   
   (* Step 7: Set up parameters - allocate space and store parameter values *)
   let llvm_params = params llvm_func in
+  let old_method_this = ctx.current_method_this in
   List.iteri (fun i param ->
     let param_val = llvm_params.(i) in
     set_value_name param.param_name param_val;
     let alloca = build_alloca (cresta_type_to_llvm ctx param.param_type) param.param_name ctx.builder in
     ignore (build_store param_val alloca ctx.builder);
-    Hashtbl.add ctx.named_values param.param_name alloca
+    
+    (* If this is the 'this' parameter, set it in the context for field access *)
+    if param.param_name = "this" then
+      ctx.current_method_this <- Some alloca
+    else
+      Hashtbl.add ctx.named_values param.param_name alloca
   ) func_decl.parameters;
   
   (* Step 8: Generate function body *)
@@ -436,6 +595,7 @@ and generate_function_impl ctx func_decl =
   );
   
   (* Step 10: Restore previous scope *)
+  ctx.current_method_this <- old_method_this;
   Hashtbl.clear ctx.named_values;
   Hashtbl.iter (Hashtbl.add ctx.named_values) saved_values;
   
@@ -447,7 +607,30 @@ let generate_function ctx func_decl = generate_function_impl ctx func_decl
 
 (* Generate code for the entire program *)
 let generate_program ctx program =
-  List.iter (fun stmt -> ignore (generate_statement ctx stmt)) program;
+  (* Separate function declarations from other statements *)
+  let (functions, other_stmts) = List.partition (function 
+    | FunctionDecl _ -> true 
+    | ClassDecl _ -> true
+    | _ -> false) program in
+  
+  (* First, generate all function and class declarations *)
+  List.iter (fun stmt -> ignore (generate_statement ctx stmt)) functions;
+  
+  (* If there are other statements, wrap them in a main function *)
+  if other_stmts <> [] then (
+    let void_type = void_type ctx.context in
+    let func_type = function_type void_type [||] in
+    let main_func = define_function "main" func_type ctx.the_module in
+    let entry_block = append_block ctx.context "entry" main_func in
+    position_at_end entry_block ctx.builder;
+    
+    (* Generate the other statements inside main *)
+    List.iter (fun stmt -> ignore (generate_statement ctx stmt)) other_stmts;
+    
+    (* Add return void *)
+    ignore (build_ret_void ctx.builder);
+  );
+  
   ctx.the_module
 
 (* Utility functions *)

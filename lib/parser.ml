@@ -18,6 +18,7 @@ type expression =
 | MemberAccess of expression * string           (* obj->member *)
 | MethodCall of expression * string * expression list  (* obj::method(args) *)
 | ArrayAccess of expression * expression list   (* array[i, j, k] *)
+| ArrayLiteral of expression list               (* [1, 2, 3, 4, 5] *)
 
 type visibility = Public | Private
 
@@ -88,33 +89,6 @@ let expect_token (expected : Lexer.token) (state : parser_state) : parser_state 
   | None -> 
       raise (ParseError ("Expected " ^ Lexer.string_of_token expected ^ 
                         " but reached end of input"))
-
-(* Expression parsing functions *)
-let parse_primary_expression (state : parser_state) : expression * parser_state =
-  match current_token state with
-  | Some (Lexer.INTEGER i) -> 
-      (IntLiteral i, advance state)
-  | Some (Lexer.FLOAT f) -> 
-      (FloatLiteral f, advance state)
-  | Some (Lexer.BOOL b) -> 
-      (BoolLiteral b, advance state)
-  | Some (Lexer.STRING s) -> 
-      (StringLiteral s, advance state)
-  | Some (Lexer.IDENTIFIER name) -> 
-      (Variable name, advance state)
-  | Some token -> 
-      raise (ParseError ("Unexpected token in expression: " ^ Lexer.string_of_token token))
-  | None -> 
-      raise (ParseError "Unexpected end of input in expression")
-
-  (* Simple test function *)
-let test_parse_primary () =
-  let tokens = Lexer.tokenize "42" "test.cr" in
-  let state = { tokens = tokens; position = 0 } in
-  let (ast, _) = parse_primary_expression state in
-  match ast with
-  | IntLiteral 42 -> Printf.printf "PASS: Successfully parsed 42!\n"
-  | _ -> Printf.printf "FAIL: Failed to parse 42\n"
 
 (* Parse expressions with precedence climbing *)
 let rec parse_expression (state : parser_state) : expression * parser_state =
@@ -232,14 +206,24 @@ and parse_member_expression (state : parser_state) : expression * parser_state =
   let rec parse_member_rest expr state =
     match current_token state with
     | Some (Lexer.ARROW) -> 
-        (* Member access: obj->member *)
+        (* Member access or method call: obj->member or obj->method() *)
         let state = advance state in  (* Skip -> *)
         let (member_name, state) = match current_token state with
           | Some (Lexer.IDENTIFIER name) -> (name, advance state)
           | Some token -> raise (ParseError ("Expected member name after ->, got: " ^ Lexer.string_of_token token))
           | None -> raise (ParseError "Expected member name after ->, got end of input")
         in
-        parse_member_rest (MemberAccess(expr, member_name)) state
+        (* Check if this is a method call (followed by parentheses) *)
+        (match current_token state with
+         | Some (Lexer.LPAREN) ->
+             (* This is a method call: obj->method(args) *)
+             let state = advance state in  (* Skip ( *)
+             let (args, state) = parse_argument_list state in
+             let state = expect_token Lexer.RPAREN state in
+             parse_member_rest (MethodCall(expr, member_name, args)) state
+         | _ ->
+             (* This is member access: obj->member *)
+             parse_member_rest (MemberAccess(expr, member_name)) state)
     | Some (Lexer.SCOPE) -> 
         (* Method call: obj::method() *)
         let state = advance state in  (* Skip :: *)
@@ -253,9 +237,58 @@ and parse_member_expression (state : parser_state) : expression * parser_state =
         let (args, state) = parse_argument_list state in
         let state = expect_token Lexer.RPAREN state in
         parse_member_rest (MethodCall(expr, method_name, args)) state
+    | Some (Lexer.LBRACKET) ->
+        (* Array access: array[index] *)
+        let state = advance state in  (* Skip [ *)
+        let (index_expr, state) = parse_expression state in
+        let state = expect_token Lexer.RBRACKET state in  (* Skip ] *)
+        parse_member_rest (ArrayAccess(expr, [index_expr])) state
     | _ -> (expr, state)
   in
   parse_member_rest expr state
+
+and parse_primary_expression (state : parser_state) : expression * parser_state =
+  match current_token state with
+  | Some (Lexer.INTEGER i) -> 
+      (IntLiteral i, advance state)
+  | Some (Lexer.FLOAT f) -> 
+      (FloatLiteral f, advance state)
+  | Some (Lexer.BOOL b) -> 
+      (BoolLiteral b, advance state)
+  | Some (Lexer.STRING s) -> 
+      (StringLiteral s, advance state)
+  | Some (Lexer.IDENTIFIER name) -> 
+      (Variable name, advance state)
+  | Some (Lexer.LBRACKET) ->
+      (* Parse array literal: [expr1, expr2, expr3] *)
+      let state = advance state in  (* Skip [ *)
+      let rec parse_array_elements acc state =
+        match current_token state with
+        | Some (Lexer.RBRACKET) -> (List.rev acc, advance state)  (* End of array *)
+        | _ when acc = [] ->
+            (* First element *)
+            let (expr, state) = parse_expression state in
+            parse_array_elements [expr] state
+        | _ ->
+            (* Subsequent elements *)
+            let state = expect_token Lexer.COMMA state in  (* Expect comma *)
+            let (expr, state) = parse_expression state in
+            parse_array_elements (expr :: acc) state
+      in
+      let (elements, state) = parse_array_elements [] state in
+      (ArrayLiteral elements, state)
+  | Some token -> 
+      raise (ParseError ("Unexpected token in expression: " ^ Lexer.string_of_token token))
+  | None -> 
+      raise (ParseError "Unexpected end of input in expression")
+
+let test_parse_primary () =
+  let tokens = Lexer.tokenize "42" "test.cr" in
+  let state = { tokens = tokens; position = 0 } in
+  let (ast, _) = parse_primary_expression state in
+  match ast with
+  | IntLiteral 42 -> Printf.printf "PASS: Successfully parsed 42!\n"
+  | _ -> Printf.printf "FAIL: Failed to parse 42\n"
 
 let test_parse_multiplication () =
   let tokens = Lexer.tokenize "2 * 3" "test.cr" in
@@ -286,19 +319,28 @@ let rec parse_statement (state : parser_state) : statement * parser_state =
   
   match current_token state with
   | Some (Lexer.LESS) -> 
-      (* Variable declaration: <type> name = expr; *)
-      parse_variable_declaration state
+      (* Could be variable declaration or function declaration: <type> name = expr; or <type> name() {} *)
+      parse_variable_or_function_declaration state
+  | Some (Lexer.VOID) ->
+      (* Function declaration: void name() {} *)
+      parse_function_declaration_without_visibility state
   | Some (Lexer.IDENTIFIER _) -> 
       (* Could be assignment or expression statement *)
       parse_assignment_or_expression state
   | Some (Lexer.IF) -> 
       (* If statement *)
       parse_if_statement state
+  | Some (Lexer.FOR) ->
+      (* For loop *)
+      parse_for_statement state
+  | Some (Lexer.WHILE) ->
+      (* While loop *)
+      parse_while_statement state
   | Some (Lexer.CLASS) -> 
       (* Class declaration *)
       parse_class_declaration state
   | Some (Lexer.PUBLIC) | Some (Lexer.PRIVATE) -> 
-      (* Function declaration *)
+      (* Function declaration with explicit visibility (for classes) *)
       parse_function_declaration state
   | Some (Lexer.RETURN) -> 
       (* Return statement *)
@@ -307,6 +349,93 @@ let rec parse_statement (state : parser_state) : statement * parser_state =
       raise (ParseError ("Unexpected token at start of statement: " ^ Lexer.string_of_token token))
   | None -> 
       raise (ParseError "Unexpected end of input in statement")
+
+and parse_variable_or_function_declaration (state : parser_state) : statement * parser_state =
+  (* Look ahead to see if this is a function or variable declaration *)
+  (* <type> name = expr; (variable) or <type> name() {} (function) *)
+  let state = expect_token Lexer.LESS state in  (* Skip < *)
+  let (typ, state) = parse_type state in
+  let state = expect_token Lexer.GREATER state in  (* Skip > *)
+  
+  (* Parse name *)
+  let (name, state) = match current_token state with
+    | Some (Lexer.IDENTIFIER name) -> (name, advance state)
+    | Some token -> raise (ParseError ("Expected identifier, got: " ^ Lexer.string_of_token token))
+    | None -> raise (ParseError "Expected identifier, got end of input")
+  in
+  
+  (* Check what comes next *)
+  match current_token state with
+  | Some (Lexer.LPAREN) ->
+      (* This is a function declaration: <type> name() {} *)
+      let state = advance state in  (* Skip ( *)
+      let (parameters, state) = parse_parameter_list state in
+      let state = expect_token Lexer.RPAREN state in
+      let state = expect_token Lexer.LBRACE state in
+      let (body, state) = parse_statement_list state in
+      let state = expect_token Lexer.RBRACE state in
+      
+      let func_decl = {
+        visibility = Public;  (* Default to public for global functions *)
+        return_type = Some typ;
+        func_name = name;
+        parameters = parameters;
+        body = body;
+      } in
+      (FunctionDecl(func_decl), state)
+  | Some (Lexer.ASSIGN) | Some (Lexer.SEMICOLON) ->
+      (* This is a variable declaration: <type> name = expr; or <type> name; *)
+      parse_variable_declaration_with_type_and_name typ name state
+  | Some token ->
+      raise (ParseError ("Expected '(', '=', or ';' after variable/function name, got: " ^ Lexer.string_of_token token))
+  | None ->
+      raise (ParseError "Expected '(', '=', or ';' after variable/function name, got end of input")
+
+and parse_function_declaration_without_visibility (state : parser_state) : statement * parser_state =
+  (* Parse void function: void name() {} *)
+  let state = expect_token Lexer.VOID state in  (* Skip void *)
+  
+  (* Parse function name *)
+  let (func_name, state) = match current_token state with
+    | Some (Lexer.IDENTIFIER name) -> (name, advance state)
+    | Some token -> raise (ParseError ("Expected function name, got: " ^ Lexer.string_of_token token))
+    | None -> raise (ParseError "Expected function name, got end of input")
+  in
+  
+  (* Parse parameter list () *)
+  let state = expect_token Lexer.LPAREN state in
+  let (parameters, state) = parse_parameter_list state in
+  let state = expect_token Lexer.RPAREN state in
+  
+  (* Parse function body { } *)
+  let state = expect_token Lexer.LBRACE state in
+  let (body, state) = parse_statement_list state in
+  let state = expect_token Lexer.RBRACE state in
+  
+  let func_decl = {
+    visibility = Public;  (* Default to public for global functions *)
+    return_type = None;   (* void *)
+    func_name = func_name;
+    parameters = parameters;
+    body = body;
+  } in
+  (FunctionDecl(func_decl), state)
+
+and parse_variable_declaration_with_type_and_name (typ : cresta_type) (name : string) (state : parser_state) : statement * parser_state =
+  (* Continue parsing variable declaration after we already have type and name *)
+  match current_token state with
+  | Some (Lexer.ASSIGN) -> 
+      let state = advance state in  (* Skip = *)
+      let (expr, state) = parse_expression state in
+      let state = expect_token Lexer.SEMICOLON state in
+      (VarDecl(typ, name, Some expr), state)
+  | Some (Lexer.SEMICOLON) ->
+      let state = advance state in  (* Skip ; *)
+      (VarDecl(typ, name, None), state)
+  | Some token ->
+      raise (ParseError ("Expected '=' or ';' in variable declaration, got: " ^ Lexer.string_of_token token))
+  | None ->
+      raise (ParseError "Expected '=' or ';' in variable declaration, got end of input")
 
 and parse_variable_declaration (state : parser_state) : statement * parser_state =
   (* Parse <type> name = expr; *)
@@ -383,60 +512,47 @@ and parse_statement_list (state : parser_state) : statement list * parser_state 
   in
   parse_statements [] state
 
-and parse_if_statement (state : parser_state) : statement * parser_state =
-  (* Parse 'if' keyword *)
-  let state = expect_token Lexer.IF state in
-  
-  (* Parse condition expression *)
-  let (condition, state) = parse_expression state in
-  
-  (* Parse if block *)
-  let state = expect_token Lexer.LBRACE state in
-  let (if_statements, state) = parse_statement_list state in
-  let state = expect_token Lexer.RBRACE state in
-  
-  (* Check for optional 'or' clause *)
-  match current_token state with
-  | Some (Lexer.OR) -> 
-      let state = advance state in  (* Skip 'or' *)
-      (* Check if there's a condition or just 'or {' (else case) *)
-      (match current_token state with
-        | Some (Lexer.LBRACE) -> 
-            (* Just 'or {' - this is the else case *)
-            let state = advance state in  (* Skip '{' *)
-            let (else_statements, state) = parse_statement_list state in
-            let state = expect_token Lexer.RBRACE state in
-            (IfStmt(condition, if_statements, Some else_statements), state)
-        | _ -> 
-            (* 'or condition {' - this is else if case *)
-            let (or_condition, state) = parse_expression state in
-            let state = expect_token Lexer.LBRACE state in
-            let (or_statements, state) = parse_statement_list state in
-            let state = expect_token Lexer.RBRACE state in
-            (* For now, we'll represent 'or condition' as nested if *)
-            (IfStmt(condition, if_statements, Some [IfStmt(or_condition, or_statements, None)]), state))
-  | _ -> 
-      (* No 'or' clause *)
-      (IfStmt(condition, if_statements, None), state)
+
 and parse_type (state : parser_state) : cresta_type * parser_state =
-  match current_token state with
-  | Some (Lexer.INT8) -> (Int8, advance state)
-  | Some (Lexer.UINT8) -> (UInt8, advance state)
-  | Some (Lexer.INT16) -> (Int16, advance state)
-  | Some (Lexer.UINT16) -> (UInt16, advance state)
-  | Some (Lexer.INT32) -> (Int32, advance state)
-  | Some (Lexer.UINT32) -> (UInt32, advance state)
-  | Some (Lexer.INT64) -> (Int64, advance state)
-  | Some (Lexer.UINT64) -> (UInt64, advance state)
-  | Some (Lexer.FLOAT32) -> (Float32, advance state)
-  | Some (Lexer.FLOAT64) -> (Float64, advance state)
-  | Some (Lexer.BOOL_TYPE) -> (Bool, advance state)
-  | Some (Lexer.STRING_TYPE) -> (String, advance state)
-  | Some (Lexer.IDENTIFIER typename) -> (UserDefined typename, advance state)  (* User-defined types *)
-  | Some token -> 
-      raise (ParseError ("Expected type name, got: " ^ Lexer.string_of_token token))
-  | None -> 
-      raise (ParseError "Expected type name, got end of input")
+  (* First parse the base type *)
+  let (base_type, state) = match current_token state with
+    | Some (Lexer.INT8) -> (Int8, advance state)
+    | Some (Lexer.UINT8) -> (UInt8, advance state)
+    | Some (Lexer.INT16) -> (Int16, advance state)
+    | Some (Lexer.UINT16) -> (UInt16, advance state)
+    | Some (Lexer.INT32) -> (Int32, advance state)
+    | Some (Lexer.UINT32) -> (UInt32, advance state)
+    | Some (Lexer.INT64) -> (Int64, advance state)
+    | Some (Lexer.UINT64) -> (UInt64, advance state)
+    | Some (Lexer.FLOAT32) -> (Float32, advance state)
+    | Some (Lexer.FLOAT64) -> (Float64, advance state)
+    | Some (Lexer.BOOL_TYPE) -> (Bool, advance state)
+    | Some (Lexer.STRING_TYPE) -> (String, advance state)
+    | Some (Lexer.IDENTIFIER typename) -> (UserDefined typename, advance state)  (* User-defined types *)
+    | Some token -> 
+        raise (ParseError ("Expected type name, got: " ^ Lexer.string_of_token token))
+    | None -> 
+        raise (ParseError "Expected type name, got end of input")
+  in
+  
+  (* Check for array dimensions: [size] *)
+  let rec parse_array_dimensions acc_type state =
+    match current_token state with
+    | Some (Lexer.LBRACKET) ->
+        let state = advance state in  (* Skip [ *)
+        (* Parse array size *)
+        let (size, state) = match current_token state with
+          | Some (Lexer.INTEGER size) -> (size, advance state)
+          | Some token -> raise (ParseError ("Expected array size (integer), got: " ^ Lexer.string_of_token token))
+          | None -> raise (ParseError "Expected array size, got end of input")
+        in
+        let state = expect_token Lexer.RBRACKET state in  (* Skip ] *)
+        let array_type = Array(acc_type, [size]) in
+        parse_array_dimensions array_type state  (* Check for more dimensions *)
+    | _ -> (acc_type, state)  (* No more array dimensions *)
+  in
+  
+  parse_array_dimensions base_type state
 
 and parse_visibility (state : parser_state) : visibility * parser_state =
   match current_token state with
@@ -580,22 +696,37 @@ and parse_class_declaration (state : parser_state) : statement * parser_state =
     | Some (Lexer.NEWLINE) -> skip_newlines (advance state)
     | _ -> state
   in
-  let rec parse_members acc state =
+  let rec parse_members acc current_visibility state =
     let state = skip_newlines state in  (* Skip newlines *)
     match current_token state with
     | Some (Lexer.RBRACE) -> 
         (* End of class *)
         (List.rev acc, state)
-    | Some (Lexer.PUBLIC) | Some (Lexer.PRIVATE) -> 
-        (* Parse member *)
-        let (member, state) = parse_class_member state in
-        parse_members (member :: acc) state
+    | Some (Lexer.PUBLIC) -> 
+        (* New public section: public: *)
+        let state = advance state in  (* Skip 'public' *)
+        let state = expect_token Lexer.COLON state in  (* Expect : *)
+        parse_members acc Public state
+    | Some (Lexer.PRIVATE) -> 
+        (* New private section: private: *)
+        let state = advance state in  (* Skip 'private' *)
+        let state = expect_token Lexer.COLON state in  (* Expect : *)
+        parse_members acc Private state
+    | Some (Lexer.VOID) ->
+        (* Parse void method with current visibility *)
+        let (func_decl, state) = parse_function_with_visibility current_visibility state in
+        let member = Method(func_decl) in
+        parse_members (member :: acc) current_visibility state
+    | Some (Lexer.LESS) ->
+        (* Parse field or method with current visibility *)
+        let (member, state) = parse_class_member_with_visibility current_visibility state in
+        parse_members (member :: acc) current_visibility state
     | Some token -> 
-        raise (ParseError ("Expected class member or '}', got: " ^ Lexer.string_of_token token))
+        raise (ParseError ("Expected class member, visibility section, or '}', got: " ^ Lexer.string_of_token token))
     | None -> 
         raise (ParseError "Unexpected end of input in class declaration")
   in
-  let (members, state) = parse_members [] state in
+  let (members, state) = parse_members [] Private state in  (* Default to private *)
   let state = expect_token Lexer.RBRACE state in
   
   let class_decl = {
@@ -603,6 +734,45 @@ and parse_class_declaration (state : parser_state) : statement * parser_state =
     members = members;
   } in
   (ClassDecl(class_decl), state)
+
+and parse_class_member_with_visibility (visibility : visibility) (state : parser_state) : class_member * parser_state =
+  (* Parse field or method starting with <type> *)
+  let state = expect_token Lexer.LESS state in
+  let (typ, state) = parse_type state in
+  let state = expect_token Lexer.GREATER state in
+  let (name, state) = match current_token state with
+    | Some (Lexer.IDENTIFIER name) -> (name, advance state)
+    | Some token -> raise (ParseError ("Expected identifier after type, got: " ^ Lexer.string_of_token token))
+    | None -> raise (ParseError "Expected identifier after type, got end of input")
+  in
+  
+  (* Check if it's a method (has parentheses) or field (has semicolon) *)
+  match current_token state with
+  | Some (Lexer.LPAREN) ->
+      (* It's a method: <type> name(...) *)
+      let state = advance state in  (* Skip ( *)
+      let (parameters, state) = parse_parameter_list state in
+      let state = expect_token Lexer.RPAREN state in
+      let state = expect_token Lexer.LBRACE state in
+      let (body, state) = parse_statement_list state in
+      let state = expect_token Lexer.RBRACE state in
+      
+      let func_decl = {
+        visibility = visibility;
+        return_type = Some typ;
+        func_name = name;
+        parameters = parameters;
+        body = body;
+      } in
+      (Method(func_decl), state)
+  | Some (Lexer.SEMICOLON) ->
+      (* It's a field: <type> name; *)
+      let state = advance state in  (* Skip ; *)
+      (Field(visibility, typ, name), state)
+  | Some token ->
+      raise (ParseError ("Expected '(' or ';' after field/method name, got: " ^ Lexer.string_of_token token))
+  | None ->
+      raise (ParseError "Expected '(' or ';' after field/method name, got end of input")
 
 and parse_return_statement (state : parser_state) : statement * parser_state =
   (* Parse 'return' keyword *)
@@ -619,6 +789,110 @@ and parse_return_statement (state : parser_state) : statement * parser_state =
       let (expr, state) = parse_expression state in
       let state = expect_token Lexer.SEMICOLON state in
       (ReturnStmt(Some expr), state)
+
+and parse_for_statement (state : parser_state) : statement * parser_state =
+  (* Parse for loop: for (init; condition; update) { body } *)
+  let state = expect_token Lexer.FOR state in
+  let state = expect_token Lexer.LPAREN state in
+  
+  (* Parse init statement (optional) *)
+  let (init_stmt, state) = 
+    match current_token state with
+    | Some (Lexer.SEMICOLON) -> (None, advance state)  (* Empty init *)
+    | Some (Lexer.LESS) ->
+        (* Variable declaration: <type> name = expr; *)
+        let state = expect_token Lexer.LESS state in
+        let (typ, state) = parse_type state in
+        let state = expect_token Lexer.GREATER state in
+        let (name, state) = match current_token state with
+          | Some (Lexer.IDENTIFIER name) -> (name, advance state)
+          | _ -> failwith "Expected identifier after type in for loop"
+        in
+        let state = expect_token Lexer.ASSIGN state in
+        let (expr, state) = parse_expression state in
+        let state = expect_token Lexer.SEMICOLON state in
+        (Some (VarDecl(typ, name, Some expr)), state)
+    | Some (Lexer.IDENTIFIER _) ->
+        (* Assignment: name = expr; *)
+        let (stmt, state) = parse_assignment_or_expression state in
+        let state = expect_token Lexer.SEMICOLON state in
+        (Some stmt, state)
+    | _ -> 
+        failwith "Expected variable declaration or assignment in for loop init"
+  in
+  
+  (* Parse condition (optional) *)
+  let (condition, state) = 
+    match current_token state with
+    | Some (Lexer.SEMICOLON) -> (None, advance state)  (* Empty condition *)
+    | _ -> 
+        let (expr, state) = parse_expression state in
+        let state = expect_token Lexer.SEMICOLON state in
+        (Some expr, state)
+  in
+  
+  (* Parse update expression (optional) *)
+  let (update_expr, state) = 
+    match current_token state with
+    | Some (Lexer.RPAREN) -> (None, state)  (* Empty update *)
+    | Some (Lexer.IDENTIFIER name) ->
+        (* Check for assignment: name = expr *)
+        let state = advance state in  (* Skip identifier *)
+        (match current_token state with
+         | Some (Lexer.ASSIGN) ->
+             let state = advance state in  (* Skip = *)
+             let (expr, state) = parse_expression state in
+             (* Convert assignment to expression by wrapping *)
+             (Some (BinaryOp(Variable name, "=", expr)), state)
+         | _ ->
+             failwith "Expected assignment in for loop update")
+    | _ -> 
+        let (expr, state) = parse_expression state in
+        (Some expr, state)
+  in
+  
+  let state = expect_token Lexer.RPAREN state in
+  let state = expect_token Lexer.LBRACE state in
+  let (body, state) = parse_statement_list state in
+  let state = expect_token Lexer.RBRACE state in
+  
+  (ForLoop(init_stmt, condition, update_expr, body), state)
+
+and parse_while_statement (state : parser_state) : statement * parser_state =
+  (* Parse while loop: while (condition) { body } *)
+  let state = expect_token Lexer.WHILE state in
+  let state = expect_token Lexer.LPAREN state in
+  let (condition, state) = parse_expression state in
+  let state = expect_token Lexer.RPAREN state in
+  let state = expect_token Lexer.LBRACE state in
+  let (body, state) = parse_statement_list state in
+  let state = expect_token Lexer.RBRACE state in
+  
+  (WhileLoop(condition, body), state)
+
+and parse_if_statement (state : parser_state) : statement * parser_state =
+  (* Parse if statement: if (condition) { then_body } [or { else_body }] *)
+  let state = expect_token Lexer.IF state in
+  let state = expect_token Lexer.LPAREN state in
+  let (condition, state) = parse_expression state in
+  let state = expect_token Lexer.RPAREN state in
+  let state = expect_token Lexer.LBRACE state in
+  let (then_body, state) = parse_statement_list state in
+  let state = expect_token Lexer.RBRACE state in
+  
+  (* Check for optional else clause *)
+  let (else_body, state) = 
+    match current_token state with
+    | Some (Lexer.OR) ->
+        let state = advance state in  (* Skip 'or' *)
+        let state = expect_token Lexer.LBRACE state in
+        let (else_stmts, state) = parse_statement_list state in
+        let state = expect_token Lexer.RBRACE state in
+        (Some else_stmts, state)
+    | _ -> (None, state)
+  in
+  
+  (IfStmt(condition, then_body, else_body), state)
 
 let test_parse_variable_declaration () =
   let tokens = Lexer.tokenize "<int32> x = 42;" "test.cr" in

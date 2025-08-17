@@ -22,6 +22,7 @@ type expression =
   | MemberAccess of expression * string
   | MethodCall of expression * string * expression list
   | ArrayAccess of expression * expression list
+  | ArrayLiteral of expression list
 
 type visibility = Public | Private
 

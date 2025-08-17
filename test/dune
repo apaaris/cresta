@@ -1,4 +1,4 @@
 (executables
- (public_names test_lexer test_parser test_semantic test_codegen)
- (names test_lexer test_parser test_semantic test_codegen)
+ (public_names test_lexer test_parser test_semantic test_codegen test_manual_codegen)
+ (names test_lexer test_parser test_semantic test_codegen test_manual_codegen)
  (libraries cresta.lib))
