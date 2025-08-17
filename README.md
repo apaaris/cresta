@@ -16,30 +16,33 @@ See `design.md` for the complete language specification.
 ## Building
 
 ```bash
+# Setup environment
+eval $(opam env)
+
 # Build the compiler
 dune build
 
 # Run the compiler
-dune exec cresta -- <options> <input_file>
+dune exec cre -- <options> <input_file>
 ```
 
 ## Usage
 
 ```bash
 # Show help
-cresta --help
+cre --help
 
 # Compile a file
-cresta program.cr
+cre program.cr
 
 # Compile with verbose output
-cresta -v program.cr
+cre -v program.cr
 
 # Specify output file
-cresta -o output.c program.cr
+cre -o output.c program.cr
 
 # Debug mode
-cresta -d program.cr
+cre -d program.cr
 ```
 
 ## Development Status
